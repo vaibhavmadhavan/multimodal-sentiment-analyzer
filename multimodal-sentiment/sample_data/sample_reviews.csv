@@ -1,0 +1,6 @@
+review_text,image_file
+"I absolutely love this product, it's amazing!",test_happy.jpg
+"This is terrible, I'm very disappointed.",test_angry.jpg
+"It's okay I guess, nothing special.",test_neutral.jpg
+"Best purchase I've ever made, highly recommend!",test_happy.jpg
+"Complete waste of money, broken on arrival.",test_angry.jpg
