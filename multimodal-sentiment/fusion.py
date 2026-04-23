@@ -4,24 +4,24 @@ from PIL import Image
 import numpy as np
 import tempfile
 import os
+from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+import torch
 
-# ── Model Initialisation ──────────────────────────────────────────
+
 _text_model = None
+_text_tokenizer = None
 
 def get_text_model():
-    global _text_model
+    global _text_model, _text_tokenizer
     if _text_model is None:
-        _text_model = pipeline(
-            "sentiment-analysis",
-            model="distilbert-base-uncased-finetuned-sst-2-english",
-            truncation=True,
-            max_length=512,
-            device="cpu"
-        )
-    return _text_model
+        model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+        _text_tokenizer = AutoTokenizer.from_pretrained(model_name)
+        _text_model = AutoModelForSequenceClassification.from_pretrained(model_name)
+        _text_model.eval()
+    return _text_model, _text_tokenizer
 
-# ── Emotion → Valence Mapping ─────────────────────────────────────
-# Maps DeepFace emotion labels to a -1 to +1 sentiment scale
+
+# Maps emotion labels to a -1 to +1 sentiment scale
 EMOTION_VALENCE = {
     "happy":    1.0,
     "surprise": 0.3,
@@ -32,33 +32,38 @@ EMOTION_VALENCE = {
     "angry":   -1.0
 }
 
-# ── Text Analysis ─────────────────────────────────────────────────
-def analyse_text(text: str) -> dict:
-    """
-    Returns a sentiment score from -1.0 (very negative) to +1.0 (very positive).
-    Uses DistilBERT fine-tuned on SST-2 dataset.
-    """
-    model = get_text_model()
-    result = model(text)[0]
-    label = result["label"]       # "POSITIVE" or "NEGATIVE"
-    confidence = result["score"]  # 0.5 to ~1.0
 
-    # Positive = +score, Negative = -score
-    score = confidence if label == "POSITIVE" else -confidence
+def analyse_text(text: str) -> dict:
+    model, tokenizer = get_text_model()
+
+    inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
+    with torch.no_grad():
+        outputs = model(**inputs)
+
+    scores = torch.softmax(outputs.logits, dim=1).squeeze()
+    # Labels order: 0=Negative, 1=Neutral, 2=Positive
+    neg, neu, pos = scores[0].item(), scores[1].item(), scores[2].item()
+
+
+    if pos >= neu and pos >= neg:
+        label = "POSITIVE"
+        score = round((pos - neg) * (1 - neu) ** 7, 4)
+    elif neg >= neu and neg >= pos:
+        label = "NEGATIVE"
+        score = round(-(neg - pos), 4)
+    else:
+        label = "NEUTRAL"
+        score = round(pos - neg, 4)
 
     return {
-        "label": label,
-        "confidence": round(confidence, 4),
-        "score": round(score, 4)
+        "label":      label,
+        "confidence": round(max(pos, neu, neg), 4),
+        "score":      round(score, 4)
     }
 
-# ── Vision Analysis ───────────────────────────────────────────────
+
+# ── Vision Analysis ───────────────────────────────────────────────────────────
 def analyse_face(image_input) -> dict:
-    """
-    Accepts a PIL Image or file path.
-    Returns dominant emotion + full emotion probability distribution.
-    """
-    # Handle PIL Image input by saving to a temp file
     if isinstance(image_input, Image.Image):
         with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
             image_input.save(tmp.name)
@@ -70,17 +75,20 @@ def analyse_face(image_input) -> dict:
         result = DeepFace.analyze(
             img_path=path,
             actions=["emotion"],
-            enforce_detection=False,  # Don't crash if no face found
+            detector_backend="retinaface",
+            enforce_detection=False,
             silent=True
         )
         emotions = result[0]["emotion"]
         dominant = result[0]["dominant_emotion"]
 
+        top_confidence = max(emotions.values())
         return {
             "dominant_emotion": dominant,
             "valence_score": round(EMOTION_VALENCE.get(dominant, 0.0), 4),
             "emotion_distribution": {k: round(v, 2) for k, v in emotions.items()},
-            "face_detected": True
+            "face_detected": True,
+            "low_confidence": top_confidence < 30
         }
     except Exception as e:
         return {
@@ -91,47 +99,37 @@ def analyse_face(image_input) -> dict:
             "error": str(e)
         }
     finally:
-        # Clean up the temp file
         if isinstance(image_input, Image.Image) and os.path.exists(path):
             os.unlink(path)
 
-# ── Fusion Engine ─────────────────────────────────────────────────
+
+# ── Fusion Engine ─────────────────────────────────────────────────────────────
 def fuse(text_score: float, face_score: float) -> dict:
-    """
-    Combines text and facial sentiment scores.
-
-    Alignment Score: 0 = complete conflict, 1 = perfect alignment
-    Conflict Threshold: >0.8 absolute difference = significant conflict
-    """
     difference = abs(text_score - face_score)
-    alignment  = round(1 - (difference / 2), 4)  # Normalise to 0–1
-
-    # Weighted combined sentiment (60% text, 40% face)
+    alignment = round(1 - (difference / 2), 4)
     combined = round((text_score * 0.6) + (face_score * 0.4), 4)
-
-    conflict = difference > 0.8
+    conflict = difference > 1.2
 
     if alignment >= 0.75:
         alignment_label = "Strong Alignment"
-    elif alignment >= 0.5:
+    elif alignment >= 0.55:
         alignment_label = "Moderate Alignment"
+    elif alignment >= 0.40:
+        alignment_label = "Slight Misalignment" 
     else:
         alignment_label = "Significant Conflict"
 
     return {
-        "alignment_score":  alignment,
-        "alignment_label":  alignment_label,
-        "combined_score":   combined,
-        "difference":       round(difference, 4),
+        "alignment_score":   alignment,
+        "alignment_label":   alignment_label,
+        "combined_score":    combined,
+        "difference":        round(difference, 4),
         "conflict_detected": conflict
     }
 
-# ── Main Analysis Function ────────────────────────────────────────
+
+# ── Main Analysis Function ────────────────────────────────────────────────────
 def analyse(text: str, image_input) -> dict:
-    """
-    Full multi-modal analysis pipeline.
-    Returns all intermediate and final results.
-    """
     text_result   = analyse_text(text)
     face_result   = analyse_face(image_input)
     fusion_result = fuse(text_result["score"], face_result["valence_score"])

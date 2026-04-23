@@ -1,23 +1,27 @@
-"""
-Run this ONCE before starting app.py to pre-cache both models.
-Saves ~10 min on first app launch.
-"""
 from transformers import pipeline
 from deepface import DeepFace
 import numpy as np
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
 
-print("Downloading NLP model (~265MB)...")
-pipe = pipeline(
-    "sentiment-analysis",
-    model="distilbert-base-uncased-finetuned-sst-2-english",
-    device="cpu"
-)
-print("NLP model ready:", pipe("test")[0])
 
-print("\nDownloading Vision model (~580MB)...")
+from transformers import AutoTokenizer, AutoModelForSequenceClassification
+
+print("Downloading NLP model (~500MB)...")
+model_name = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+AutoTokenizer.from_pretrained(model_name)
+AutoModelForSequenceClassification.from_pretrained(model_name)
+print("NLP model ready ✓")
+
+print("\nDownloading Vision model (DeepFace + RetinaFace)...")
 dummy = np.zeros((100, 100, 3), dtype=np.uint8)
 try:
-    DeepFace.analyze(dummy, actions=["emotion"], enforce_detection=False)
+    DeepFace.analyze(
+        dummy,
+        actions=["emotion"],
+        detector_backend="retinaface",
+        enforce_detection=False,
+        silent=True
+    )
 except:
     pass
 print("Vision model pre-cached ✓")
