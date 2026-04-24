@@ -1,12 +1,8 @@
-from transformers import pipeline
-from deepface import DeepFace
+from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
+from fer import FER
 from PIL import Image
 import numpy as np
-import tempfile
-import os
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
 import torch
-
 
 _text_model = None
 _text_tokenizer = None
@@ -21,7 +17,6 @@ def get_text_model():
     return _text_model, _text_tokenizer
 
 
-# Maps emotion labels to a -1 to +1 sentiment scale
 EMOTION_VALENCE = {
     "happy":    1.0,
     "surprise": 0.3,
@@ -35,15 +30,12 @@ EMOTION_VALENCE = {
 
 def analyse_text(text: str) -> dict:
     model, tokenizer = get_text_model()
-
     inputs = tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
     with torch.no_grad():
         outputs = model(**inputs)
 
     scores = torch.softmax(outputs.logits, dim=1).squeeze()
-    # Labels order: 0=Negative, 1=Neutral, 2=Positive
     neg, neu, pos = scores[0].item(), scores[1].item(), scores[2].item()
-
 
     if pos >= neu and pos >= neg:
         label = "POSITIVE"
@@ -62,33 +54,44 @@ def analyse_text(text: str) -> dict:
     }
 
 
-# ── Vision Analysis ───────────────────────────────────────────────────────────
+_face_detector = None
+
+def get_face_detector():
+    global _face_detector
+    if _face_detector is None:
+        _face_detector = FER(mtcnn=False)  # mtcnn=False = lighter, no extra deps
+    return _face_detector
+
+
 def analyse_face(image_input) -> dict:
     if isinstance(image_input, Image.Image):
-        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
-            image_input.save(tmp.name)
-            path = tmp.name
+        img = np.array(image_input.convert("RGB"))
     else:
-        path = image_input
+        img = np.array(Image.open(image_input).convert("RGB"))
 
     try:
-        result = DeepFace.analyze(
-            img_path=path,
-            actions=["emotion"],
-            detector_backend="retinaface",
-            enforce_detection=False,
-            silent=True
-        )
-        emotions = result[0]["emotion"]
-        dominant = result[0]["dominant_emotion"]
+        detector = get_face_detector()
+        results = detector.detect_emotions(img)
 
-        top_confidence = max(emotions.values())
+        if not results:
+            return {
+                "dominant_emotion": "neutral",
+                "valence_score": 0.0,
+                "emotion_distribution": {k: 0.0 for k in EMOTION_VALENCE},
+                "face_detected": False,
+                "error": "No face detected"
+            }
+
+        emotions = results[0]["emotions"]  # {'angry': 0.02, 'happy': 0.85, ...}
+        dominant = max(emotions, key=emotions.get)
+        top_confidence = emotions[dominant]
+
         return {
             "dominant_emotion": dominant,
             "valence_score": round(EMOTION_VALENCE.get(dominant, 0.0), 4),
-            "emotion_distribution": {k: round(v, 2) for k, v in emotions.items()},
+            "emotion_distribution": {k: round(v, 4) for k, v in emotions.items()},
             "face_detected": True,
-            "low_confidence": top_confidence < 30
+            "low_confidence": top_confidence < 0.30
         }
     except Exception as e:
         return {
@@ -98,12 +101,8 @@ def analyse_face(image_input) -> dict:
             "face_detected": False,
             "error": str(e)
         }
-    finally:
-        if isinstance(image_input, Image.Image) and os.path.exists(path):
-            os.unlink(path)
 
 
-# ── Fusion Engine ─────────────────────────────────────────────────────────────
 def fuse(text_score: float, face_score: float) -> dict:
     difference = abs(text_score - face_score)
     alignment = round(1 - (difference / 2), 4)
@@ -115,7 +114,7 @@ def fuse(text_score: float, face_score: float) -> dict:
     elif alignment >= 0.55:
         alignment_label = "Moderate Alignment"
     elif alignment >= 0.40:
-        alignment_label = "Slight Misalignment" 
+        alignment_label = "Slight Misalignment"
     else:
         alignment_label = "Significant Conflict"
 
@@ -128,7 +127,6 @@ def fuse(text_score: float, face_score: float) -> dict:
     }
 
 
-# ── Main Analysis Function ────────────────────────────────────────────────────
 def analyse(text: str, image_input) -> dict:
     text_result   = analyse_text(text)
     face_result   = analyse_face(image_input)
