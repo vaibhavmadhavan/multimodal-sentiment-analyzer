@@ -1,11 +1,10 @@
-from transformers import pipeline, AutoTokenizer, AutoModelForSequenceClassification
-from fer import FER
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, pipeline
 from PIL import Image
-import numpy as np
 import torch
 
 _text_model = None
 _text_tokenizer = None
+_face_model = None
 
 def get_text_model():
     global _text_model, _text_tokenizer
@@ -16,6 +15,16 @@ def get_text_model():
         _text_model.eval()
     return _text_model, _text_tokenizer
 
+def get_face_model():
+    global _face_model
+    if _face_model is None:
+        _face_model = pipeline(
+            "image-classification",
+            model="trpakov/vit-face-expression",
+            device="cpu"
+        )
+    return _face_model
+
 
 EMOTION_VALENCE = {
     "happy":    1.0,
@@ -25,6 +34,21 @@ EMOTION_VALENCE = {
     "sad":     -0.7,
     "disgust": -0.8,
     "angry":   -1.0
+}
+
+# Model label → our label
+LABEL_MAP = {
+    "happy":    "happy",
+    "happiness": "happy",
+    "sad":      "sad",
+    "sadness":  "sad",
+    "angry":    "angry",
+    "anger":    "angry",
+    "surprise": "surprise",
+    "surprised": "surprise",
+    "fear":     "fear",
+    "disgust":  "disgust",
+    "neutral":  "neutral",
 }
 
 
@@ -54,52 +78,42 @@ def analyse_text(text: str) -> dict:
     }
 
 
-_face_detector = None
-
-def get_face_detector():
-    global _face_detector
-    if _face_detector is None:
-        _face_detector = FER(mtcnn=False)  # mtcnn=False = lighter, no extra deps
-    return _face_detector
-
-
 def analyse_face(image_input) -> dict:
-    if isinstance(image_input, Image.Image):
-        img = np.array(image_input.convert("RGB"))
-    else:
-        img = np.array(Image.open(image_input).convert("RGB"))
-
     try:
-        detector = get_face_detector()
-        results = detector.detect_emotions(img)
+        if not isinstance(image_input, Image.Image):
+            image_input = Image.open(image_input)
+        image_input = image_input.convert("RGB")
+
+        detector = get_face_model()
+        results = detector(image_input)  # list of {"label": ..., "score": ...}
 
         if not results:
-            return {
-                "dominant_emotion": "neutral",
-                "valence_score": 0.0,
-                "emotion_distribution": {k: 0.0 for k in EMOTION_VALENCE},
-                "face_detected": False,
-                "error": "No face detected"
-            }
+            raise ValueError("No results from model")
 
-        emotions = results[0]["emotions"]  # {'angry': 0.02, 'happy': 0.85, ...}
-        dominant = max(emotions, key=emotions.get)
-        top_confidence = emotions[dominant]
+        # Normalise labels and build distribution
+        emotion_dist = {k: 0.0 for k in EMOTION_VALENCE}
+        for r in results:
+            mapped = LABEL_MAP.get(r["label"].lower(), "neutral")
+            emotion_dist[mapped] = round(emotion_dist.get(mapped, 0.0) + r["score"], 4)
+
+        dominant = max(emotion_dist, key=emotion_dist.get)
+        top_confidence = emotion_dist[dominant]
 
         return {
-            "dominant_emotion": dominant,
-            "valence_score": round(EMOTION_VALENCE.get(dominant, 0.0), 4),
-            "emotion_distribution": {k: round(v, 4) for k, v in emotions.items()},
-            "face_detected": True,
-            "low_confidence": top_confidence < 0.30
+            "dominant_emotion":    dominant,
+            "valence_score":       round(EMOTION_VALENCE.get(dominant, 0.0), 4),
+            "emotion_distribution": emotion_dist,
+            "face_detected":       True,
+            "low_confidence":      top_confidence < 0.30
         }
+
     except Exception as e:
         return {
-            "dominant_emotion": "neutral",
-            "valence_score": 0.0,
+            "dominant_emotion":    "neutral",
+            "valence_score":       0.0,
             "emotion_distribution": {k: 0.0 for k in EMOTION_VALENCE},
-            "face_detected": False,
-            "error": str(e)
+            "face_detected":       False,
+            "error":               str(e)
         }
 
 
