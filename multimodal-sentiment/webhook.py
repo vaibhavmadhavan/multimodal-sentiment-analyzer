@@ -34,6 +34,7 @@ LABEL_MAP = {
 def analyse_text(text: str) -> float:
     resp = requests.post(TEXT_API_URL, headers=HF_HEADERS, json={"inputs": text}, timeout=30)
     results = resp.json()
+    print(f"DEBUG text API response: {results}", flush=True)
     if isinstance(results, list) and isinstance(results[0], list):
         results = results[0]
     scores = {r["label"].lower(): r["score"] for r in results}
