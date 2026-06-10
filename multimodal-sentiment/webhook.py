@@ -85,7 +85,8 @@ def process_and_reply(text: str, media_url: str | None, from_number: str, to_num
             face_score = analyse_face(image_bytes)
         fusion = fuse(text_score, face_score)
         reply = generate_reply(fusion["combined_score"], fusion["conflict_detected"])
-    except Exception:
+    except Exception as e:
+        print(f"ERROR in process_and_reply: {e}", flush=True)
         reply = "Sorry, we couldn't process your message. Please try again."
 
     Client(TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN).messages.create(
