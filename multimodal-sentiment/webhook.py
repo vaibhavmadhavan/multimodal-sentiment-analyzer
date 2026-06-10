@@ -15,8 +15,8 @@ TWILIO_AUTH_TOKEN  = os.environ.get("TWILIO_AUTH_TOKEN")
 HF_TOKEN           = os.environ.get("HF_TOKEN", "")
 
 HF_HEADERS   = {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
-TEXT_API_URL = "https://api-inference.huggingface.co/models/cardiffnlp/twitter-roberta-base-sentiment-latest"
-FACE_API_URL = "https://api-inference.huggingface.co/models/trpakov/vit-face-expression"
+TEXT_API_URL = "https://router.huggingface.co/hf-inference/models/cardiffnlp/twitter-roberta-base-sentiment-latest"
+FACE_API_URL = "https://router.huggingface.co/hf-inference/models/trpakov/vit-face-expression"
 
 EMOTION_VALENCE = {
     "happy": 1.0, "surprise": 0.3, "neutral": 0.0,
